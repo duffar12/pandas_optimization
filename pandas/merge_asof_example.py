@@ -1,4 +1,6 @@
 import pandas as pd
+from datetime import timedelta
+import polars as pl
 import numpy as np
 import time
 
@@ -6,7 +8,9 @@ import time
 #######################################################################################################################
 # Create a pandas dataframe of 30M rows and ~40 columns for the left side of a merge_asof
 #######################################################################################################################
-left_df_size = 30_000_000
+divisor = 10
+
+left_df_size = 30_000_000 // divisor
 left_df = pd.DataFrame()
 # the join will have 2 float columns as the keys to join on before performing the merge_asof (these are used in the 'by' parameter)
 left_df["join_float"] = np.random.choice(np.linspace(-10, 10, 81), size=left_df_size).astype(np.float64) # handicap
@@ -36,7 +40,7 @@ for i in range(1,11):
 #######################################################################################################################
 # Create a pandas dataframe of 5M rows and 8 columns for the right side of a merge_asof
 #######################################################################################################################
-right_df_size = 5_000_000
+right_df_size = 5_000_000 // divisor
 right_df = pd.DataFrame()
 # the join will have 2 float columns as the keys to join on before performing the merge_asof (these are used in the 'by' parameter)
 right_df["join_float"] = np.random.choice(np.linspace(-10, 10, 81), size=right_df_size).astype(np.float64) # handicap
@@ -53,10 +57,82 @@ right_df["string3"] = np.random.choice(["aaa", "bbbb", "ccccc", "dddddd", "eeeee
 
 
 
+def merge_asof_via_polars(
+    left,
+    right,
+    on=None,
+    left_on=None,
+    right_on=None,
+    by=None,
+    tolerance=None,
+):
+    # Take pandas input, converts to Polars, apply `join_asof`, convert back to pandas.
+    if on is not None:
+        if left_on is not None:
+            raise ValueError("Can only pass one of 'on' and 'left_on'")
+        if right_on is not None:
+            raise ValueError("Can only pass one of 'on' and 'right_on'")
+        left_on = on
+        right_on = on
+    else:
+        if left_on is None or right_on is None:
+            raise ValueError("Must pass 'on' or 'left_on' and 'right_on'")
+
+    left_pl = pl.from_pandas(left).sort(left_on)
+    right_pl = pl.from_pandas(right).sort(right_on)
+    result = left_pl.join_asof(
+        right_pl,
+        on=on,
+        left_on=left_on,
+        right_on=right_on,
+        by=by,
+        tolerance=tolerance,
+    )
+    cols = {}
+    for col in result.columns:
+        if result[col].dtype == pl.String():
+            cols[col] = result[col].to_pandas(use_pyarrow_extension_array=True)
+        else:
+            cols[col] = result[col].to_pandas()
+    return pd.DataFrame(cols)
+
+def merge_asof_via_polars_no_conversion(
+    left,
+    right,
+    on=None,
+    left_on=None,
+    right_on=None,
+    by=None,
+    tolerance=None,
+):
+    # Like the above, but assumes input is already Polars
+    if on is not None:
+        if left_on is not None:
+            raise ValueError("Can only pass one of 'on' and 'left_on'")
+        if right_on is not None:
+            raise ValueError("Can only pass one of 'on' and 'right_on'")
+        left_on = on
+        right_on = on
+    else:
+        if left_on is None or right_on is None:
+            raise ValueError("Must pass 'on' or 'left_on' and 'right_on'")
+
+    left_pl = left.sort(left_on)
+    right_pl = right.sort(right_on)
+    result = left_pl.join_asof(
+        right_pl,
+        on=on,
+        left_on=left_on,
+        right_on=right_on,
+        by=by,
+        tolerance=tolerance,
+    )
+    return result
+
 #######################################################################################################################
 # Now perform the merge_asof
 #######################################################################################################################
-start = time.time()
+start = time.perf_counter()
 merge_columns = ["join_float", "join_float2"]
 df= pd.merge_asof(
     left_df.sort_values(by="merge_time"),
@@ -66,4 +142,41 @@ df= pd.merge_asof(
     by=merge_columns,
     tolerance=pd.Timedelta("30m"),
 )
-print(f"Time taken to perform merge_asof: {time.time() - start:.2f} seconds")
+print(f"Time taken to perform merge_asof: {time.perf_counter() - start:.2f} seconds")
+print(df)
+
+
+start = time.perf_counter()
+merge_columns = ["join_float", "join_float2"]
+df_fast= merge_asof_via_polars(
+    left_df,
+    right_df,
+    left_on="merge_time",
+    right_on="merge_time",
+    by=merge_columns,
+    tolerance=timedelta(minutes=30),
+)
+print(f"Time taken to perform merge_asof via Polars: {time.perf_counter() - start:.2f} seconds")
+print(df_fast)
+
+left_pl = pl.from_pandas(left_df)
+right_pl = pl.from_pandas(right_df)
+start = time.perf_counter()
+merge_columns = ["join_float", "join_float2"]
+df_fast= merge_asof_via_polars_no_conversion(
+    left_pl,
+    right_pl,
+    left_on="merge_time",
+    right_on="merge_time",
+    by=merge_columns,
+    tolerance=timedelta(minutes=30),
+)
+print(f"Time taken to perform merge_asof via Polars (not including data conversion): {time.perf_counter() - start:.2f} seconds")
+print(df_fast)
+
+# check results actually match
+if divisor >= 1000:
+    pd.testing.assert_frame_equal(
+        df.sort_values(merge_columns).reset_index(drop=True),
+        df_fast.sort_values(merge_columns).reset_index(drop=True),
+    )
