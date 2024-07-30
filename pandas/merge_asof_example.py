@@ -159,6 +159,14 @@ df_fast= merge_asof_via_polars(
 print(f"Time taken to perform merge_asof via Polars: {time.perf_counter() - start:.2f} seconds")
 print(df_fast)
 
+# check results actually match
+if divisor >= 1000:
+    df[df.dtypes[df.dtypes==object].index] = df[df.dtypes[df.dtypes==object].index].astype('large_string[pyarrow]')
+    pd.testing.assert_frame_equal(
+        df.sort_values(merge_columns).reset_index(drop=True),
+        df_fast.sort_values(merge_columns).reset_index(drop=True),
+    )
+
 left_pl = pl.from_pandas(left_df)
 right_pl = pl.from_pandas(right_df)
 start = time.perf_counter()
@@ -173,10 +181,3 @@ df_fast= merge_asof_via_polars_no_conversion(
 )
 print(f"Time taken to perform merge_asof via Polars (not including data conversion): {time.perf_counter() - start:.2f} seconds")
 print(df_fast)
-
-# check results actually match
-if divisor >= 1000:
-    pd.testing.assert_frame_equal(
-        df.sort_values(merge_columns).reset_index(drop=True),
-        df_fast.sort_values(merge_columns).reset_index(drop=True),
-    )
